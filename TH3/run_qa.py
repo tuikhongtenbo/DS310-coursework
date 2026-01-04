@@ -346,6 +346,13 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
 
+    if len(tokenizer) > model.config.vocab_size:
+        logger.warning(
+            f"Resize model embeddings from {model.config.vocab_size} to {len(tokenizer)} "
+            f"to match tokenizer vocabulary size."
+        )
+        model.resize_token_embeddings(len(tokenizer))
+
     # Check tokenizer type
     is_fast = hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)
     if not is_fast:
