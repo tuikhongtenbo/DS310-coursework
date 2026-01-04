@@ -318,7 +318,7 @@ def main():
     
     # Special handling for PhoBERT: use PhobertTokenizerFast explicitly
     model_name = model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path
-    is_phobert = "phobert" in model_name.lower()
+    is_phobert = "phobert" in model_args.model_name_or_path.lower()
     
     if is_phobert:
         try:
