@@ -474,23 +474,27 @@ def main():
                 examples[question_column_name if pad_on_right else context_column_name],
                 examples[context_column_name if pad_on_right else question_column_name]
             )):
-                # Tokenize with stride to handle long contexts
+                # For slow tokenizers, we can't use stride easily, so we just tokenize normally
+                # This means we might lose some long contexts, but it's the best we can do
                 tokenized = tokenizer(
                     question if pad_on_right else context,
                     context if pad_on_right else question,
                     truncation="only_second" if pad_on_right else "only_first",
                     max_length=max_seq_length,
-                    stride=data_args.doc_stride,
-                    return_overflowing_tokens=True,
-                    return_offsets_mapping=True,
                     padding="max_length" if data_args.pad_to_max_length else False,
+                    return_overflowing_tokens=False,  # Slow tokenizer doesn't support this well
                 )
                 
-                num_features = len(tokenized["input_ids"])
-                all_input_ids.extend(tokenized["input_ids"])
-                all_attention_masks.extend(tokenized["attention_mask"])
-                all_offset_mappings.extend(tokenized["offset_mapping"])
-                all_sample_mappings.extend([example_idx] * num_features)
+                # Compute offset mapping manually
+                full_text = (question if pad_on_right else context) + " " + (context if pad_on_right else question)
+                offset_mapping = compute_offset_mapping_slow(
+                    tokenizer, full_text, tokenized["input_ids"], tokenized["attention_mask"]
+                )
+                
+                all_input_ids.append(tokenized["input_ids"])
+                all_attention_masks.append(tokenized["attention_mask"])
+                all_offset_mappings.append(offset_mapping)
+                all_sample_mappings.append(example_idx)
             
             tokenized_examples = {
                 "input_ids": all_input_ids,
