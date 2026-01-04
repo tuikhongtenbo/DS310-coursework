@@ -740,104 +740,41 @@ def main():
                         input_ids.extend([pad_id] * pad_length)
                         attention_mask.extend([0] * pad_length)
                     
-                    # Compute offset mapping - try to use accurate method, fallback to approximate
+                    # Compute offset mapping - slow tokenizers don't support return_offsets_mapping
+                    # So we use approximate method based on decoded text positions
                     offset_mapping = []
-                    
-                    try:
-                        # Try to get accurate offsets using encode_plus with return_offsets_mapping
-                        # This may not work for slow tokenizers, so we have a fallback
-                        question_encoded = tokenizer.encode_plus(
-                            question,
-                            add_special_tokens=False,
-                            return_offsets_mapping=True
-                        )
-                        context_encoded = tokenizer.encode_plus(
-                            context,
-                            add_special_tokens=False,
-                            return_offsets_mapping=True
-                        )
-                        
-                        question_offsets = question_encoded.get("offset_mapping", [])
-                        context_offsets = context_encoded.get("offset_mapping", [])
-                        question_encoded_ids = question_encoded["input_ids"]
-                        context_encoded_ids = context_encoded["input_ids"]
-                        
-                        use_accurate_offsets = len(question_offsets) > 0 and len(context_offsets) > 0
-                    except (TypeError, AttributeError, KeyError):
-                        use_accurate_offsets = False
                     
                     # CLS token
                     offset_mapping.append((0, 0))
                     
-                    if use_accurate_offsets:
-                        # Use accurate offsets from tokenizer
-                        # Map question tokens
-                        for q_token_id in question_tokens["input_ids"]:
-                            found = False
-                            for idx, enc_id in enumerate(question_encoded_ids):
-                                if enc_id == q_token_id:
-                                    if idx < len(question_offsets):
-                                        offset_mapping.append(question_offsets[idx])
-                                        found = True
-                                        break
-                            if not found:
-                                offset_mapping.append((0, 0))
-                        
-                        # SEP after question
-                        offset_mapping.append((len(question), len(question)))
-                        
-                        # Map context chunk tokens
-                        # Find where the chunk starts in the full context
-                        chunk_start_idx = None
-                        if len(context_chunk_ids) > 0:
-                            first_chunk_token = context_chunk_ids[0]
-                            for idx in range(len(context_encoded_ids) - len(context_chunk_ids) + 1):
-                                if context_encoded_ids[idx:idx+len(context_chunk_ids)] == context_chunk_ids:
-                                    chunk_start_idx = idx
-                                    break
-                        
-                        if chunk_start_idx is not None:
-                            for i in range(len(context_chunk_ids)):
-                                if chunk_start_idx + i < len(context_offsets):
-                                    offset_mapping.append(context_offsets[chunk_start_idx + i])
-                                else:
-                                    offset_mapping.append((len(context), len(context)))
+                    # For slow tokenizers, we use approximate offsets based on decoded text positions
+                    # Question tokens - approximate positions
+                    current_pos = 0
+                    for q_token_id in question_tokens["input_ids"]:
+                        token_text = tokenizer.decode([q_token_id], skip_special_tokens=False).strip()
+                        if token_text:
+                            offset_mapping.append((current_pos, current_pos + len(token_text)))
+                            current_pos += len(token_text) + 1  # +1 for space
                         else:
-                            # Fallback for chunk
-                            for _ in context_chunk_ids:
-                                offset_mapping.append((0, 0))
-                        
-                        # SEP after context
-                        offset_mapping.append((len(context), len(context)))
-                    else:
-                        # Fallback: approximate offsets (less accurate but works for slow tokenizers)
-                        # Question tokens - approximate
-                        current_pos = 0
-                        for q_token_id in question_tokens["input_ids"]:
-                            token_text = tokenizer.decode([q_token_id], skip_special_tokens=False).strip()
-                            if token_text:
-                                offset_mapping.append((current_pos, current_pos + len(token_text)))
-                                current_pos += len(token_text) + 1
-                            else:
-                                offset_mapping.append((current_pos, current_pos))
-                        
-                        # SEP after question
-                        offset_mapping.append((len(question), len(question)))
-                        
-                        # Context chunk tokens - approximate based on chunk position
-                        # Calculate approximate start position in context
-                        context_before = tokenizer.decode(context_input_ids[:start_idx], skip_special_tokens=False)
-                        context_pos = len(context_before)
-                        for ctx_token_id in context_chunk_ids:
-                            token_text = tokenizer.decode([ctx_token_id], skip_special_tokens=False).strip()
-                            if token_text:
-                                offset_mapping.append((context_pos, context_pos + len(token_text)))
-                                context_pos += len(token_text) + 1
-                            else:
-                                offset_mapping.append((context_pos, context_pos))
-                        
-                        # SEP after context
-                        offset_mapping.append((len(context), len(context)))
+                            offset_mapping.append((current_pos, current_pos))
+                    
+                    # SEP after question
+                    offset_mapping.append((len(question), len(question)))
+                    
+                    # Context chunk tokens - approximate based on chunk position in original context
+                    # Calculate approximate start position by decoding tokens before this chunk
+                    context_before = tokenizer.decode(context_input_ids[:start_idx], skip_special_tokens=False)
+                    context_pos = len(context_before)
+                    for ctx_token_id in context_chunk_ids:
+                        token_text = tokenizer.decode([ctx_token_id], skip_special_tokens=False).strip()
+                        if token_text:
+                            offset_mapping.append((context_pos, context_pos + len(token_text)))
+                            context_pos += len(token_text) + 1  # +1 for space
+                        else:
+                            offset_mapping.append((context_pos, context_pos))
+                    
+                    # SEP after context
+                    offset_mapping.append((len(context), len(context)))
                     
                     # Pad offset mappings
                     if data_args.pad_to_max_length and len(offset_mapping) < max_seq_length:
