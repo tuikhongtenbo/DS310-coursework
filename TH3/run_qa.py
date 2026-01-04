@@ -315,14 +315,28 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=True,
-        revision=model_args.model_revision,
-        token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_fast=True,
+            revision=model_args.model_revision,
+            token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+    except (OSError, ValueError, TypeError) as e:
+        logger.warning(
+            f"Fast tokenizer not available. Falling back to slow tokenizer. Error: {str(e)}"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_fast=False,
+            revision=model_args.model_revision,
+            token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+    
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -333,9 +347,8 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
 
-    # Tokenizer check: this script requires a fast tokenizer.
-    # Check if tokenizer has _tokenizer attribute (from tokenizers library) or is_fast property
-    if not (hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)):
+    is_fast = hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)
+    if not is_fast:
         raise TypeError(
             "This example script only works for models that have a fast tokenizer. Check out the big table of models at"
             " https://huggingface.co/transformers/index.html#supported-frameworks to find the model types that meet"
