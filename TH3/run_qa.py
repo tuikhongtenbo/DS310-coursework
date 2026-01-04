@@ -316,11 +316,11 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
     
-    # Special handling for PhoBERT: use PhobertTokenizerFast explicitly
+    # Special handling for PhoBERT: use PhobertTokenizer explicitly
     if "phobert" in model_args.model_name_or_path.lower():
-        from transformers.models.phobert.tokenization_phobert_fast import PhobertTokenizerFast
-        logger.info("Using PhobertTokenizerFast for PhoBERT model")
-        tokenizer = PhobertTokenizerFast.from_pretrained(
+        from transformers import PhobertTokenizer
+        logger.info("Using PhobertTokenizer for PhoBERT model")
+        tokenizer = PhobertTokenizer.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
             revision=model_args.model_revision,
@@ -346,7 +346,8 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
 
-    assert tokenizer.is_fast, "Tokenizer must be fast"
+    if "phobert" not in model_args.model_name_or_path.lower():
+        assert tokenizer.is_fast, "Tokenizer must be fast for non-PhoBERT models"
 
     # Preprocessing the datasets.
     # Preprocessing is slightly different for training and evaluation.
