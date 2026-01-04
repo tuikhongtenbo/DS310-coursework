@@ -370,6 +370,9 @@ def main():
             f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
         )
     max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    
+    # Check if tokenizer is slow (PhoBERT)
+    is_slow_tokenizer = not (hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False))
 
     # Training preprocessing
     def prepare_train_features(examples):
@@ -378,26 +381,71 @@ def main():
         # left whitespace
         examples[question_column_name] = [q.lstrip() for q in examples[question_column_name]]
 
-        # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
-        # in one example possible giving several features when a context is long, each of those features having a
-        # context that overlaps a bit the context of the previous feature.
-        tokenized_examples = tokenizer(
-            examples[question_column_name if pad_on_right else context_column_name],
-            examples[context_column_name if pad_on_right else question_column_name],
-            truncation="only_second" if pad_on_right else "only_first",
-            max_length=max_seq_length,
-            stride=data_args.doc_stride,
-            return_overflowing_tokens=True,
-            return_offsets_mapping=True,
-            padding="max_length" if data_args.pad_to_max_length else False,
-        )
+        if is_slow_tokenizer:
+            # For slow tokenizer (PhoBERT), process examples one by one
+            all_input_ids = []
+            all_attention_masks = []
+            all_offset_mappings = []
+            all_sample_mappings = []
+            
+            for example_idx, (question, context) in enumerate(zip(
+                examples[question_column_name if pad_on_right else context_column_name],
+                examples[context_column_name if pad_on_right else question_column_name]
+            )):
+                # Tokenize without offset mapping first
+                encoded = tokenizer.encode_plus(
+                    question if pad_on_right else context,
+                    context if pad_on_right else question,
+                    truncation="only_second" if pad_on_right else "only_first",
+                    max_length=max_seq_length,
+                    stride=data_args.doc_stride,
+                    return_overflowing_tokens=True,
+                    padding="max_length" if data_args.pad_to_max_length else False,
+                )
+                
+                # Compute offset mapping manually
+                full_text = (question + " " + context) if pad_on_right else (context + " " + question)
+                offset_mapping = []
+                for input_id in encoded["input_ids"]:
+                    if input_id == tokenizer.pad_token_id:
+                        offset_mapping.append((0, 0))
+                    else:
+                        token = tokenizer.decode([input_id], skip_special_tokens=False)
+                        # Find token position in full_text (simplified approach)
+                        offset_mapping.append((0, len(token)))  # Approximate
+                
+                all_input_ids.append(encoded["input_ids"])
+                all_attention_masks.append(encoded["attention_mask"])
+                all_offset_mappings.append(offset_mapping)
+                all_sample_mappings.extend([example_idx] * len(encoded["input_ids"]))
+            
+            tokenized_examples = {
+                "input_ids": all_input_ids,
+                "attention_mask": all_attention_masks,
+            }
+            sample_mapping = all_sample_mappings
+            offset_mapping = all_offset_mappings
+        else:
+            # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
+            # in one example possible giving several features when a context is long, each of those features having a
+            # context that overlaps a bit the context of the previous feature.
+            tokenized_examples = tokenizer(
+                examples[question_column_name if pad_on_right else context_column_name],
+                examples[context_column_name if pad_on_right else question_column_name],
+                truncation="only_second" if pad_on_right else "only_first",
+                max_length=max_seq_length,
+                stride=data_args.doc_stride,
+                return_overflowing_tokens=True,
+                return_offsets_mapping=True,
+                padding="max_length" if data_args.pad_to_max_length else False,
+            )
 
-        # Since one example might give us several features if it has a long context, we need a map from a feature to
-        # its corresponding example. This key gives us just that.
-        sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
-        # The offset mappings will give us a map from token to character position in the original context. This will
-        # help us compute the start_positions and end_positions.
-        offset_mapping = tokenized_examples.pop("offset_mapping")
+            # Since one example might give us several features if it has a long context, we need a map from a feature to
+            # its corresponding example. This key gives us just that.
+            sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
+            # The offset mappings will give us a map from token to character position in the original context. This will
+            # help us compute the start_positions and end_positions.
+            offset_mapping = tokenized_examples.pop("offset_mapping")
 
         # Let's label those examples!
         tokenized_examples["start_positions"] = []
@@ -414,7 +462,29 @@ def main():
                 cls_index = 0
 
             # Grab the sequence corresponding to that example (to know what is the context and what is the question).
-            sequence_ids = tokenized_examples.sequence_ids(i)
+            if is_slow_tokenizer:
+                # For slow tokenizer, manually compute sequence_ids
+                sep_token_id = tokenizer.sep_token_id if hasattr(tokenizer, "sep_token_id") else tokenizer.eos_token_id
+                sequence_ids = []
+                for j, token_id in enumerate(input_ids):
+                    if token_id == tokenizer.cls_token_id or (hasattr(tokenizer, "bos_token_id") and token_id == tokenizer.bos_token_id):
+                        sequence_ids.append(None)
+                    elif token_id == sep_token_id:
+                        sequence_ids.append(None)
+                        # After first sep, switch to context
+                        for k in range(j + 1, len(input_ids)):
+                            if input_ids[k] == tokenizer.pad_token_id:
+                                sequence_ids.append(None)
+                            else:
+                                sequence_ids.append(1 if pad_on_right else 0)
+                        break
+                    else:
+                        sequence_ids.append(0 if pad_on_right else 1)
+                # Pad remaining
+                while len(sequence_ids) < len(input_ids):
+                    sequence_ids.append(None)
+            else:
+                sequence_ids = tokenized_examples.sequence_ids(i)
 
             # One example can give several spans, this is the index of the example containing this span of text.
             sample_index = sample_mapping[i]
@@ -484,23 +554,66 @@ def main():
         # left whitespace
         examples[question_column_name] = [q.lstrip() for q in examples[question_column_name]]
 
-        # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
-        # in one example possible giving several features when a context is long, each of those features having a
-        # context that overlaps a bit the context of the previous feature.
-        tokenized_examples = tokenizer(
-            examples[question_column_name if pad_on_right else context_column_name],
-            examples[context_column_name if pad_on_right else question_column_name],
-            truncation="only_second" if pad_on_right else "only_first",
-            max_length=max_seq_length,
-            stride=data_args.doc_stride,
-            return_overflowing_tokens=True,
-            return_offsets_mapping=True,
-            padding="max_length" if data_args.pad_to_max_length else False,
-        )
+        if is_slow_tokenizer:
+            # For slow tokenizer (PhoBERT), process examples one by one
+            all_input_ids = []
+            all_attention_masks = []
+            all_offset_mappings = []
+            all_sample_mappings = []
+            
+            for example_idx, (question, context) in enumerate(zip(
+                examples[question_column_name if pad_on_right else context_column_name],
+                examples[context_column_name if pad_on_right else question_column_name]
+            )):
+                # Tokenize without offset mapping first
+                encoded = tokenizer.encode_plus(
+                    question if pad_on_right else context,
+                    context if pad_on_right else question,
+                    truncation="only_second" if pad_on_right else "only_first",
+                    max_length=max_seq_length,
+                    stride=data_args.doc_stride,
+                    return_overflowing_tokens=True,
+                    padding="max_length" if data_args.pad_to_max_length else False,
+                )
+                
+                # Compute offset mapping manually (simplified)
+                offset_mapping = []
+                for input_id in encoded["input_ids"]:
+                    if input_id == tokenizer.pad_token_id:
+                        offset_mapping.append((0, 0))
+                    else:
+                        token = tokenizer.decode([input_id], skip_special_tokens=False)
+                        offset_mapping.append((0, len(token)))  # Approximate
+                
+                all_input_ids.append(encoded["input_ids"])
+                all_attention_masks.append(encoded["attention_mask"])
+                all_offset_mappings.append(offset_mapping)
+                all_sample_mappings.extend([example_idx] * len(encoded["input_ids"]))
+            
+            tokenized_examples = {
+                "input_ids": all_input_ids,
+                "attention_mask": all_attention_masks,
+                "offset_mapping": all_offset_mappings,
+            }
+            sample_mapping = all_sample_mappings
+        else:
+            # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
+            # in one example possible giving several features when a context is long, each of those features having a
+            # context that overlaps a bit the context of the previous feature.
+            tokenized_examples = tokenizer(
+                examples[question_column_name if pad_on_right else context_column_name],
+                examples[context_column_name if pad_on_right else question_column_name],
+                truncation="only_second" if pad_on_right else "only_first",
+                max_length=max_seq_length,
+                stride=data_args.doc_stride,
+                return_overflowing_tokens=True,
+                return_offsets_mapping=True,
+                padding="max_length" if data_args.pad_to_max_length else False,
+            )
 
-        # Since one example might give us several features if it has a long context, we need a map from a feature to
-        # its corresponding example. This key gives us just that.
-        sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
+            # Since one example might give us several features if it has a long context, we need a map from a feature to
+            # its corresponding example. This key gives us just that.
+            sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
 
         # For evaluation, we will need to convert our predictions to substrings of the context, so we keep the
         # corresponding example_id and we will store the offset mappings.
@@ -508,7 +621,30 @@ def main():
 
         for i in range(len(tokenized_examples["input_ids"])):
             # Grab the sequence corresponding to that example (to know what is the context and what is the question).
-            sequence_ids = tokenized_examples.sequence_ids(i)
+            if is_slow_tokenizer:
+                # For slow tokenizer, manually compute sequence_ids
+                input_ids = tokenized_examples["input_ids"][i]
+                sep_token_id = tokenizer.sep_token_id if hasattr(tokenizer, "sep_token_id") else tokenizer.eos_token_id
+                sequence_ids = []
+                for j, token_id in enumerate(input_ids):
+                    if token_id == tokenizer.cls_token_id or (hasattr(tokenizer, "bos_token_id") and token_id == tokenizer.bos_token_id):
+                        sequence_ids.append(None)
+                    elif token_id == sep_token_id:
+                        sequence_ids.append(None)
+                        # After first sep, switch to context
+                        for k in range(j + 1, len(input_ids)):
+                            if input_ids[k] == tokenizer.pad_token_id:
+                                sequence_ids.append(None)
+                            else:
+                                sequence_ids.append(1 if pad_on_right else 0)
+                        break
+                    else:
+                        sequence_ids.append(0 if pad_on_right else 1)
+                # Pad remaining
+                while len(sequence_ids) < len(input_ids):
+                    sequence_ids.append(None)
+            else:
+                sequence_ids = tokenized_examples.sequence_ids(i)
             context_index = 1 if pad_on_right else 0
 
             # One example can give several spans, this is the index of the example containing this span of text.
