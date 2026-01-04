@@ -128,7 +128,7 @@ class DataTrainingArguments:
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
     max_seq_length: int = field(
-        default=384,
+        default=256,
         metadata={
             "help": (
                 "The maximum total input sequence length after tokenization. Sequences longer "
@@ -390,12 +390,19 @@ def main():
     # Padding side determines if we do (question|context) or (context|question).
     pad_on_right = tokenizer.padding_side == "right"
 
-    if data_args.max_seq_length > tokenizer.model_max_length:
+    # Lấy max length từ config của model (chính xác hơn tokenizer.model_max_length đối với PhoBERT)
+    model_max_length = config.max_position_embeddings if hasattr(config, "max_position_embeddings") else tokenizer.model_max_length
+    
+    # Đôi khi tokenizer báo max length rất lớn (1e30), ta cần chặn nó lại
+    if model_max_length > 10000: 
+        model_max_length = 512 # Fallback an toàn
+
+    if data_args.max_seq_length > model_max_length:
         logger.warning(
             f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the "
-            f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+            f"model config ({model_max_length}). Using max_seq_length={model_max_length}."
         )
-    max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    max_seq_length = min(data_args.max_seq_length, model_max_length)
 
     # Helper function to compute offset mapping for slow tokenizers
     def compute_offset_mapping_slow(tokenizer, text, input_ids, attention_mask):
