@@ -158,21 +158,30 @@ def postprocess_qa_predictions(
                             "end_logit": end_logits[end_index],
                         }
                     )
+        # Initialize null_score for version_2_with_negative
+        null_score = None
         if version_2_with_negative and min_null_prediction is not None:
             # Add the minimum null prediction
             prelim_predictions.append(min_null_prediction)
             null_score = min_null_prediction["score"]
+        elif version_2_with_negative:
+            # If no null prediction was found, create a default one
+            null_score = 0.0
 
         # Only keep the best `n_best_size` predictions.
         predictions = sorted(prelim_predictions, key=lambda x: x["score"], reverse=True)[:n_best_size]
 
         # Add back the minimum null prediction if it was removed because of its low score.
-        if (
-            version_2_with_negative
-            and min_null_prediction is not None
-            and not any(p["offsets"] == (0, 0) for p in predictions)
-        ):
-            predictions.append(min_null_prediction)
+        # Check if null prediction (with offsets (0,0)) is already in predictions
+        has_null_prediction = False
+        if version_2_with_negative and min_null_prediction is not None:
+            for pred in predictions:
+                # Check if this is the null prediction by comparing offsets before they're popped
+                if "offsets" in pred and pred["offsets"] == (0, 0):
+                    has_null_prediction = True
+                    break
+            if not has_null_prediction:
+                predictions.append(min_null_prediction)
 
         # Use the offsets to gather the answer text in the original context.
         context = example["context"]
@@ -201,12 +210,19 @@ def postprocess_qa_predictions(
         else:
             # Otherwise we first need to find the best non-empty prediction.
             i = 0
-            while predictions[i]["text"] == "":
+            while i < len(predictions) and predictions[i]["text"] == "":
                 i += 1
-            best_non_null_pred = predictions[i]
+            # If all predictions are empty, use the first one (which should be empty or null)
+            if i >= len(predictions):
+                best_non_null_pred = predictions[0] if len(predictions) > 0 else {"text": "", "start_logit": 0.0, "end_logit": 0.0, "score": 0.0}
+            else:
+                best_non_null_pred = predictions[i]
 
             # Then we compare to the null prediction using the threshold.
-            score_diff = null_score - best_non_null_pred["start_logit"] - best_non_null_pred["end_logit"]
+            # Ensure best_non_null_pred has the required keys
+            start_logit = best_non_null_pred.get("start_logit", 0.0)
+            end_logit = best_non_null_pred.get("end_logit", 0.0)
+            score_diff = null_score - start_logit - end_logit
             scores_diff_json[example["id"]] = float(score_diff)  # To be JSON-serializable.
             if score_diff > null_score_diff_threshold:
                 all_predictions[example["id"]] = ""
