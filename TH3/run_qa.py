@@ -356,7 +356,14 @@ def main():
         )
         model.resize_token_embeddings(tokenizer_vocab_size)
 
-    if "vinai/phobert-base" not in model_args.model_name_or_path.lower():
+    # Check if this is PhoBERT by checking model path, config, or tokenizer class
+    is_phobert_model = (
+        "vinai/phobert" in model_args.model_name_or_path.lower() or
+        getattr(config, "tokenizer_class", "").lower() == "phoberttokenizer" or
+        tokenizer.__class__.__name__ == "PhobertTokenizer"
+    )
+    
+    if not is_phobert_model:
         assert tokenizer.is_fast, "Tokenizer MUST be fast for QA"
 
     # Preprocessing the datasets.
@@ -377,7 +384,12 @@ def main():
     # For PhoBERT, max_position_embeddings is 258, need to respect this
     # PhoBERT has max_position_embeddings=258, so we should use max_length=256 for safety
     max_pos_embeddings = getattr(config, "max_position_embeddings", None)
-    is_phobert = "vinai/phobert" in model_args.model_name_or_path.lower()
+    # Use the same check as above to determine if this is PhoBERT
+    is_phobert = (
+        "vinai/phobert" in model_args.model_name_or_path.lower() or
+        getattr(config, "tokenizer_class", "").lower() == "phoberttokenizer" or
+        tokenizer.__class__.__name__ == "PhobertTokenizer"
+    )
     
     if is_phobert and max_pos_embeddings:
         # For PhoBERT, use safe max_length (256) to avoid exceeding max_position_embeddings (258)
