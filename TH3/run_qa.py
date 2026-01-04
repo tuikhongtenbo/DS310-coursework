@@ -346,6 +346,16 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
 
+    # Resize token embeddings if tokenizer vocab size is larger than model vocab size
+    tokenizer_vocab_size = len(tokenizer)
+    model_vocab_size = model.config.vocab_size
+    if tokenizer_vocab_size > model_vocab_size:
+        logger.warning(
+            f"Resizing model embeddings from {model_vocab_size} to {tokenizer_vocab_size} "
+            f"to match tokenizer vocabulary size."
+        )
+        model.resize_token_embeddings(tokenizer_vocab_size)
+
     if "vinai/phobert-base" not in model_args.model_name_or_path.lower():
         assert tokenizer.is_fast, "Tokenizer MUST be fast for QA"
 
@@ -365,12 +375,24 @@ def main():
     pad_on_right = tokenizer.padding_side == "right"
 
     # For PhoBERT, max_position_embeddings is 258, need to respect this
+    # PhoBERT has max_position_embeddings=258, so we should use max_length=256 for safety
     max_pos_embeddings = getattr(config, "max_position_embeddings", None)
-    if max_pos_embeddings:
-        max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length, max_pos_embeddings)
+    is_phobert = "vinai/phobert" in model_args.model_name_or_path.lower()
+    
+    if is_phobert and max_pos_embeddings:
+        # For PhoBERT, use safe max_length (256) to avoid exceeding max_position_embeddings (258)
+        safe_max_length = min(256, max_pos_embeddings - 2)  # Leave 2 tokens margin
+        max_seq_length = min(data_args.max_seq_length, safe_max_length, tokenizer.model_max_length)
         if max_seq_length < data_args.max_seq_length:
             logger.warning(
                 f"PhoBERT max_position_embeddings is {max_pos_embeddings}. "
+                f"Reducing max_seq_length from {data_args.max_seq_length} to {max_seq_length} for safety."
+            )
+    elif max_pos_embeddings:
+        max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length, max_pos_embeddings)
+        if max_seq_length < data_args.max_seq_length:
+            logger.warning(
+                f"Model max_position_embeddings is {max_pos_embeddings}. "
                 f"Reducing max_seq_length from {data_args.max_seq_length} to {max_seq_length}."
             )
     else:
@@ -383,7 +405,10 @@ def main():
     
     # Check if tokenizer is slow (PhoBERT)
     is_slow_tokenizer = not (hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False))
-    is_phobert = "vinai/phobert" in model_args.model_name_or_path.lower()
+    
+    if is_phobert:
+        logger.info(f"PhoBERT detected: Using max_seq_length={max_seq_length}, vocab_size={tokenizer.vocab_size}, "
+                   f"max_position_embeddings={max_pos_embeddings}")
 
     # Training preprocessing
     def prepare_train_features(examples):
@@ -394,6 +419,8 @@ def main():
 
         if is_slow_tokenizer:
             # For slow tokenizer (PhoBERT), process examples one by one
+            # PhoBERT slow tokenizer doesn't support return_overflowing_tokens well,
+            # so we handle it manually
             all_input_ids = []
             all_attention_masks = []
             all_offset_mappings = []
@@ -403,32 +430,99 @@ def main():
                 examples[question_column_name if pad_on_right else context_column_name],
                 examples[context_column_name if pad_on_right else question_column_name]
             )):
-                # Tokenize without offset mapping first
-                encoded = tokenizer.encode_plus(
-                    question if pad_on_right else context,
-                    context if pad_on_right else question,
-                    truncation="only_second" if pad_on_right else "only_first",
-                    max_length=max_seq_length,
-                    stride=data_args.doc_stride,
-                    return_overflowing_tokens=True,
-                    padding="max_length" if data_args.pad_to_max_length else False,
-                )
+                # Tokenize question and context separately first to get proper offsets
+                question_tokens = tokenizer(question, add_special_tokens=False, return_offsets_mapping=False)
+                context_tokens = tokenizer(context, add_special_tokens=False, return_offsets_mapping=False)
                 
-                # Compute offset mapping manually
-                full_text = (question + " " + context) if pad_on_right else (context + " " + question)
-                offset_mapping = []
-                for input_id in encoded["input_ids"]:
-                    if input_id == tokenizer.pad_token_id:
-                        offset_mapping.append((0, 0))
-                    else:
-                        token = tokenizer.decode([input_id], skip_special_tokens=False)
-                        # Find token position in full_text (simplified approach)
-                        offset_mapping.append((0, len(token)))  # Approximate
+                # Calculate how many tokens we can fit
+                # Account for special tokens: [CLS] question [SEP] context [SEP]
+                special_tokens_count = 3
+                max_context_length = max_seq_length - len(question_tokens["input_ids"]) - special_tokens_count
                 
-                all_input_ids.append(encoded["input_ids"])
-                all_attention_masks.append(encoded["attention_mask"])
-                all_offset_mappings.append(offset_mapping)
-                all_sample_mappings.extend([example_idx] * len(encoded["input_ids"]))
+                if max_context_length <= 0:
+                    # Question is too long, truncate it
+                    question_tokens = tokenizer(
+                        question,
+                        add_special_tokens=False,
+                        max_length=max_seq_length - special_tokens_count - 10,  # Leave some space for context
+                        truncation=True,
+                        return_offsets_mapping=False
+                    )
+                    max_context_length = max_seq_length - len(question_tokens["input_ids"]) - special_tokens_count
+                
+                # Split context into chunks if needed
+                context_input_ids = context_tokens["input_ids"]
+                num_context_chunks = max(1, (len(context_input_ids) + max_context_length - 1) // max_context_length)
+                
+                for chunk_idx in range(num_context_chunks):
+                    start_idx = chunk_idx * max_context_length
+                    end_idx = min(start_idx + max_context_length, len(context_input_ids))
+                    
+                    # Get context chunk
+                    context_chunk_ids = context_input_ids[start_idx:end_idx]
+                    
+                    # Build full sequence: [CLS] + question + [SEP] + context_chunk + [SEP]
+                    cls_id = tokenizer.cls_token_id if hasattr(tokenizer, "cls_token_id") else tokenizer.bos_token_id
+                    sep_id = tokenizer.sep_token_id if hasattr(tokenizer, "sep_token_id") else tokenizer.eos_token_id
+                    
+                    input_ids = [cls_id] + question_tokens["input_ids"] + [sep_id] + context_chunk_ids + [sep_id]
+                    
+                    # Truncate if still too long (shouldn't happen, but safety check)
+                    if len(input_ids) > max_seq_length:
+                        input_ids = input_ids[:max_seq_length]
+                        # Ensure last token is SEP
+                        if input_ids[-1] != sep_id:
+                            input_ids[-1] = sep_id
+                    
+                    # Create attention mask
+                    attention_mask = [1] * len(input_ids)
+                    
+                    # Pad if needed
+                    if data_args.pad_to_max_length and len(input_ids) < max_seq_length:
+                        pad_length = max_seq_length - len(input_ids)
+                        pad_id = tokenizer.pad_token_id if hasattr(tokenizer, "pad_token_id") else 0
+                        input_ids.extend([pad_id] * pad_length)
+                        attention_mask.extend([0] * pad_length)
+                    
+                    # Compute offset mapping for this chunk
+                    # For PhoBERT, we need to compute offsets manually
+                    offset_mapping = []
+                    current_pos = 0
+                    
+                    # CLS token
+                    offset_mapping.append((0, 0))
+                    
+                    # Question tokens - approximate positions
+                    question_text = question
+                    for q_token_id in question_tokens["input_ids"]:
+                        token_text = tokenizer.decode([q_token_id], skip_special_tokens=False)
+                        token_len = len(token_text.strip())
+                        offset_mapping.append((current_pos, current_pos + token_len))
+                        current_pos += token_len
+                    
+                    # SEP after question
+                    offset_mapping.append((current_pos, current_pos))
+                    
+                    # Context chunk tokens - approximate positions
+                    context_start_pos = current_pos + 1
+                    context_chunk_text = tokenizer.decode(context_chunk_ids, skip_special_tokens=False)
+                    for ctx_token_id in context_chunk_ids:
+                        token_text = tokenizer.decode([ctx_token_id], skip_special_tokens=False)
+                        token_len = len(token_text.strip())
+                        offset_mapping.append((current_pos, current_pos + token_len))
+                        current_pos += token_len
+                    
+                    # SEP after context
+                    offset_mapping.append((current_pos, current_pos))
+                    
+                    # Pad offset mappings
+                    if data_args.pad_to_max_length and len(offset_mapping) < max_seq_length:
+                        offset_mapping.extend([(0, 0)] * (max_seq_length - len(offset_mapping)))
+                    
+                    all_input_ids.append(input_ids)
+                    all_attention_masks.append(attention_mask)
+                    all_offset_mappings.append(offset_mapping)
+                    all_sample_mappings.append(example_idx)
             
             tokenized_examples = {
                 "input_ids": all_input_ids,
@@ -567,6 +661,8 @@ def main():
 
         if is_slow_tokenizer:
             # For slow tokenizer (PhoBERT), process examples one by one
+            # PhoBERT slow tokenizer doesn't support return_overflowing_tokens well,
+            # so we handle it manually similar to training
             all_input_ids = []
             all_attention_masks = []
             all_offset_mappings = []
@@ -576,30 +672,103 @@ def main():
                 examples[question_column_name if pad_on_right else context_column_name],
                 examples[context_column_name if pad_on_right else question_column_name]
             )):
-                # Tokenize without offset mapping first
-                encoded = tokenizer.encode_plus(
-                    question if pad_on_right else context,
-                    context if pad_on_right else question,
-                    truncation="only_second" if pad_on_right else "only_first",
-                    max_length=max_seq_length,
-                    stride=data_args.doc_stride,
-                    return_overflowing_tokens=True,
-                    padding="max_length" if data_args.pad_to_max_length else False,
-                )
+                # Tokenize question and context separately first
+                question_tokens = tokenizer(question, add_special_tokens=False, return_offsets_mapping=False)
+                context_tokens = tokenizer(context, add_special_tokens=False, return_offsets_mapping=False)
                 
-                # Compute offset mapping manually (simplified)
-                offset_mapping = []
-                for input_id in encoded["input_ids"]:
-                    if input_id == tokenizer.pad_token_id:
-                        offset_mapping.append((0, 0))
-                    else:
-                        token = tokenizer.decode([input_id], skip_special_tokens=False)
-                        offset_mapping.append((0, len(token)))  # Approximate
+                # Calculate how many tokens we can fit
+                special_tokens_count = 3  # [CLS] [SEP] [SEP]
+                max_context_length = max_seq_length - len(question_tokens["input_ids"]) - special_tokens_count
                 
-                all_input_ids.append(encoded["input_ids"])
-                all_attention_masks.append(encoded["attention_mask"])
-                all_offset_mappings.append(offset_mapping)
-                all_sample_mappings.extend([example_idx] * len(encoded["input_ids"]))
+                if max_context_length <= 0:
+                    # Question is too long, truncate it
+                    question_tokens = tokenizer(
+                        question,
+                        add_special_tokens=False,
+                        max_length=max_seq_length - special_tokens_count - 10,
+                        truncation=True,
+                        return_offsets_mapping=False
+                    )
+                    max_context_length = max_seq_length - len(question_tokens["input_ids"]) - special_tokens_count
+                
+                # Split context into chunks with stride
+                context_input_ids = context_tokens["input_ids"]
+                stride = data_args.doc_stride
+                num_context_chunks = max(1, (len(context_input_ids) + max_context_length - stride - 1) // (max_context_length - stride))
+                
+                for chunk_idx in range(num_context_chunks):
+                    start_idx = chunk_idx * (max_context_length - stride) if chunk_idx > 0 else 0
+                    end_idx = min(start_idx + max_context_length, len(context_input_ids))
+                    
+                    if start_idx >= len(context_input_ids):
+                        break
+                    
+                    # Get context chunk
+                    context_chunk_ids = context_input_ids[start_idx:end_idx]
+                    
+                    # Build full sequence
+                    cls_id = tokenizer.cls_token_id if hasattr(tokenizer, "cls_token_id") else tokenizer.bos_token_id
+                    sep_id = tokenizer.sep_token_id if hasattr(tokenizer, "sep_token_id") else tokenizer.eos_token_id
+                    
+                    input_ids = [cls_id] + question_tokens["input_ids"] + [sep_id] + context_chunk_ids + [sep_id]
+                    
+                    # Truncate if needed
+                    if len(input_ids) > max_seq_length:
+                        input_ids = input_ids[:max_seq_length]
+                        if input_ids[-1] != sep_id:
+                            input_ids[-1] = sep_id
+                    
+                    # Create attention mask
+                    attention_mask = [1] * len(input_ids)
+                    
+                    # Pad if needed
+                    if data_args.pad_to_max_length and len(input_ids) < max_seq_length:
+                        pad_length = max_seq_length - len(input_ids)
+                        pad_id = tokenizer.pad_token_id if hasattr(tokenizer, "pad_token_id") else 0
+                        input_ids.extend([pad_id] * pad_length)
+                        attention_mask.extend([0] * pad_length)
+                    
+                    # Compute offset mapping - simplified but better than before
+                    offset_mapping = []
+                    current_pos = 0
+                    
+                    # CLS token
+                    offset_mapping.append((0, 0))
+                    
+                    # Question tokens
+                    for q_token_id in question_tokens["input_ids"]:
+                        token_text = tokenizer.decode([q_token_id], skip_special_tokens=False).strip()
+                        if token_text:
+                            offset_mapping.append((current_pos, current_pos + len(token_text)))
+                            current_pos += len(token_text) + 1  # +1 for space
+                        else:
+                            offset_mapping.append((current_pos, current_pos))
+                    
+                    # SEP after question
+                    offset_mapping.append((current_pos, current_pos))
+                    
+                    # Context chunk tokens - map to original context position
+                    context_start_char = len(tokenizer.decode(context_input_ids[:start_idx], skip_special_tokens=False))
+                    context_pos = context_start_char
+                    for ctx_token_id in context_chunk_ids:
+                        token_text = tokenizer.decode([ctx_token_id], skip_special_tokens=False).strip()
+                        if token_text:
+                            offset_mapping.append((context_pos, context_pos + len(token_text)))
+                            context_pos += len(token_text) + 1
+                        else:
+                            offset_mapping.append((context_pos, context_pos))
+                    
+                    # SEP after context
+                    offset_mapping.append((context_pos, context_pos))
+                    
+                    # Pad offset mappings
+                    if data_args.pad_to_max_length and len(offset_mapping) < max_seq_length:
+                        offset_mapping.extend([(0, 0)] * (max_seq_length - len(offset_mapping)))
+                    
+                    all_input_ids.append(input_ids)
+                    all_attention_masks.append(attention_mask)
+                    all_offset_mappings.append(offset_mapping)
+                    all_sample_mappings.append(example_idx)
             
             tokenized_examples = {
                 "input_ids": all_input_ids,

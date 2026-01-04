@@ -1,0 +1,16 @@
+# Core ML Libraries
+torch
+transformers
+datasets
+evaluate
+accelerate
+
+# Utilities
+numpy
+tqdm
+
+# Optional but recommended for better performance
+tokenizers
+
+# For evaluation metrics (SQuAD)
+# Already included in evaluate package
