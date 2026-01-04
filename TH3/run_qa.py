@@ -317,33 +317,18 @@ def main():
     )
     
     # Special handling for PhoBERT: use PhobertTokenizerFast explicitly
-    model_name = model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path
-    is_phobert = "phobert" in model_args.model_name_or_path.lower()
-    
-    if is_phobert:
-        try:
-            from transformers.models.phobert import PhobertTokenizerFast
-            logger.info("Using PhobertTokenizerFast for PhoBERT model")
-            tokenizer = PhobertTokenizerFast.from_pretrained(
-                model_name,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                token=model_args.token,
-                trust_remote_code=True,
-            )
-        except (ImportError, OSError, ValueError, TypeError) as e:
-            logger.warning(f"Could not load PhobertTokenizerFast, falling back to AutoTokenizer: {str(e)}")
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                cache_dir=model_args.cache_dir,
-                use_fast=True,
-                revision=model_args.model_revision,
-                token=model_args.token,
-                trust_remote_code=True,
-            )
+    if "phobert" in model_args.model_name_or_path.lower():
+        from transformers.models.phobert.tokenization_phobert_fast import PhobertTokenizerFast
+        logger.info("Using PhobertTokenizerFast for PhoBERT model")
+        tokenizer = PhobertTokenizerFast.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            token=model_args.token,
+        )
     else:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
             use_fast=True,
             revision=model_args.model_revision,
@@ -361,13 +346,7 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
 
-    is_fast = hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)
-    if not is_fast:
-        raise TypeError(
-            "This example script only works for models that have a fast tokenizer. Check out the big table of models at"
-            " https://huggingface.co/transformers/index.html#supported-frameworks to find the model types that meet"
-            " this requirement"
-        )
+    assert tokenizer.is_fast, "Tokenizer must be fast"
 
     # Preprocessing the datasets.
     # Preprocessing is slightly different for training and evaluation.
