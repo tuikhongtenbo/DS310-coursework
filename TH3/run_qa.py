@@ -330,14 +330,32 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=True,
-        revision=model_args.model_revision,
-        token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
+    # Try to load fast tokenizer first, fallback to slow tokenizer if not available
+    # This is needed for models like PhoBERT that don't have fast tokenizer
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_fast=True,
+            revision=model_args.model_revision,
+            token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+    except (OSError, ValueError, TypeError) as e:
+        # If fast tokenizer is not available, fallback to slow tokenizer
+        logger.warning(
+            f"Fast tokenizer not available for this model. Falling back to slow tokenizer. "
+            f"Error: {str(e)}"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_fast=False,
+            revision=model_args.model_revision,
+            token=model_args.token,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+    
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -348,13 +366,13 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
     )
 
-    # Tokenizer check: this script requires a fast tokenizer.
-    # Check if tokenizer has _tokenizer attribute (from tokenizers library) or is_fast property
-    if not (hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)):
-        raise TypeError(
-            "This example script only works for models that have a fast tokenizer. Check out the big table of models at"
-            " https://huggingface.co/transformers/index.html#supported-frameworks to find the model types that meet"
-            " this requirement"
+    # Tokenizer check: warn if using slow tokenizer (but allow it to proceed)
+    # Fast tokenizer is preferred for performance, but slow tokenizer will work
+    is_fast = hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)
+    if not is_fast:
+        logger.warning(
+            "You are using a slow tokenizer. This will work but may be slower than using a fast tokenizer. "
+            "Consider using a model with fast tokenizer support for better performance."
         )
 
     # Preprocessing the datasets.

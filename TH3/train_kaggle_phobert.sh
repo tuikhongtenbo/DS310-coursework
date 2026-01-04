@@ -1,13 +1,14 @@
 #!/bin/bash
-# Optimized training script for XLM-RoBERTa on Kaggle - UIT ViQUAD 2.0
+# Training script for PhoBERT on Kaggle - UIT ViQUAD 2.0
+# Note: PhoBERT uses slow tokenizer, but code has been updated to support it
 
 export TOKENIZERS_PARALLELISM=false
 export WANDB_DISABLED=true
 
-MODEL_NAME="xlm-roberta-base"
-OUTPUT_DIR="/kaggle/working/xlmr-base"
+MODEL_NAME="vinai/phobert-base"
+OUTPUT_DIR="/kaggle/working/phobert-base"
 
-echo "Starting XLM-RoBERTa training with optimized hyperparameters..."
+echo "Starting PhoBERT training (using slow tokenizer - this is normal)..."
 
 python run_qa.py \
   --model_name_or_path ${MODEL_NAME} \
@@ -17,10 +18,10 @@ python run_qa.py \
   --do_eval \
   --evaluation_strategy steps \
   --save_strategy steps \
-  --per_device_train_batch_size 6 \
-  --per_device_eval_batch_size 12 \
-  --gradient_accumulation_steps 5 \
-  --learning_rate 2e-5 \
+  --per_device_train_batch_size 8 \
+  --per_device_eval_batch_size 16 \
+  --gradient_accumulation_steps 4 \
+  --learning_rate 3e-5 \
   --num_train_epochs 3 \
   --warmup_ratio 0.1 \
   --max_seq_length 512 \
@@ -45,13 +46,16 @@ python run_qa.py \
   --null_score_diff_threshold 0.0 \
   --overwrite_output_dir
 
-echo "XLM-RoBERTa training completed."
+echo "PhoBERT training completed. Best model saved in ${OUTPUT_DIR}"
+
+# Prediction on test set
+echo "Starting prediction on test set..."
 
 python run_qa.py \
   --model_name_or_path ${OUTPUT_DIR} \
   --test_file "/kaggle/input/uit-viquad-2-0/Private_Test_ref.json" \
   --do_predict \
-  --per_device_eval_batch_size 12 \
+  --per_device_eval_batch_size 16 \
   --max_seq_length 512 \
   --doc_stride 128 \
   --dataloader_num_workers 4 \
@@ -61,4 +65,5 @@ python run_qa.py \
   --max_answer_length 30 \
   --null_score_diff_threshold 0.0
 
-echo "XLM-RoBERTa prediction completed."
+echo "Prediction completed. Results saved in ${OUTPUT_DIR}/pred"
+
