@@ -1,0 +1,14 @@
+# .sh files like train_kaggle_phobert.sh, train_kaggle_optimized.sh, train_kaggle_xlmr.sh
+train_kaggle_phobert.sh
+train_kaggle_optimized.sh
+train_kaggle_xlmr.sh
+
+# .py files like debug_phobert.py, kaggle_training_commands.py
+debug_phobert.py
+kaggle_training_commands.py
+
+# .json files like train.json, dev.json, test.json
+train.json
+dev.json
+test.json
+dataset/
