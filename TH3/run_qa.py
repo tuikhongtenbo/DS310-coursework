@@ -315,23 +315,37 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    try:
+    
+    # Special handling for PhoBERT: use PhobertTokenizerFast explicitly
+    model_name = model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path
+    is_phobert = "phobert" in model_name.lower()
+    
+    if is_phobert:
+        try:
+            from transformers.models.phobert import PhobertTokenizerFast
+            logger.info("Using PhobertTokenizerFast for PhoBERT model")
+            tokenizer = PhobertTokenizerFast.from_pretrained(
+                model_name,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                token=model_args.token,
+                trust_remote_code=True,
+            )
+        except (ImportError, OSError, ValueError, TypeError) as e:
+            logger.warning(f"Could not load PhobertTokenizerFast, falling back to AutoTokenizer: {str(e)}")
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                cache_dir=model_args.cache_dir,
+                use_fast=True,
+                revision=model_args.model_revision,
+                token=model_args.token,
+                trust_remote_code=True,
+            )
+    else:
         tokenizer = AutoTokenizer.from_pretrained(
-            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+            model_name,
             cache_dir=model_args.cache_dir,
             use_fast=True,
-            revision=model_args.model_revision,
-            token=model_args.token,
-            trust_remote_code=model_args.trust_remote_code,
-        )
-    except (OSError, ValueError, TypeError) as e:
-        logger.warning(
-            f"Fast tokenizer not available. Falling back to slow tokenizer. Error: {str(e)}"
-        )
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-            cache_dir=model_args.cache_dir,
-            use_fast=False,
             revision=model_args.model_revision,
             token=model_args.token,
             trust_remote_code=model_args.trust_remote_code,
