@@ -490,6 +490,15 @@ def main():
 
         for i, offsets in enumerate(offset_mapping):
             input_ids = tokenized_examples["input_ids"][i]
+            seq_len = len(input_ids)
+            
+            if len(offsets) != seq_len:
+                if len(offsets) > seq_len:
+                    offsets = offsets[:seq_len]
+                else:
+                    offsets = list(offsets) + [(0, 0)] * (seq_len - len(offsets))
+                offset_mapping[i] = offsets
+            
             if tokenizer.cls_token_id in input_ids:
                 cls_index = input_ids.index(tokenizer.cls_token_id)
             elif tokenizer.bos_token_id in input_ids:
@@ -530,27 +539,34 @@ def main():
                     token_start_index += 1
 
                 token_end_index = len(input_ids) - 1
-                while token_end_index >= 0 and sequence_ids[token_end_index] != (1 if pad_on_right else 0):
+                while token_end_index >= 0 and token_end_index < len(sequence_ids) and sequence_ids[token_end_index] != (1 if pad_on_right else 0):
                     token_end_index -= 1
 
-                if (token_start_index >= len(offsets) or token_end_index < 0 or 
+                if (token_start_index >= len(offsets) or token_start_index >= len(input_ids) or 
+                    token_end_index < 0 or token_end_index >= len(offsets) or token_end_index >= len(input_ids) or
                     not (offsets[token_start_index][0] <= start_char and offsets[token_end_index][1] >= end_char)):
                     tokenized_examples["start_positions"].append(cls_index)
                     tokenized_examples["end_positions"].append(cls_index)
                 else:
-                    while token_start_index < len(offsets) and offsets[token_start_index][0] <= start_char:
+                    while token_start_index < len(offsets) and token_start_index < len(input_ids) and offsets[token_start_index][0] <= start_char:
                         token_start_index += 1
                     start_pos = max(0, min(token_start_index - 1, len(input_ids) - 1))
                     
-                    while token_end_index >= 0 and token_end_index < len(offsets) and offsets[token_end_index][1] >= end_char:
+                    while token_end_index >= 0 and token_end_index < len(offsets) and token_end_index < len(input_ids) and offsets[token_end_index][1] >= end_char:
                         token_end_index -= 1
                     end_pos = max(0, min(token_end_index + 1, len(input_ids) - 1))
                     
-                    if start_pos > end_pos or start_pos >= len(input_ids) or end_pos >= len(input_ids):
+                    start_pos = max(0, min(start_pos, len(input_ids) - 1))
+                    end_pos = max(0, min(end_pos, len(input_ids) - 1))
+                    
+                    if start_pos > end_pos:
                         start_pos = end_pos = cls_index
                     
-                    tokenized_examples["start_positions"].append(start_pos)
-                    tokenized_examples["end_positions"].append(end_pos)
+                    if start_pos >= len(input_ids) or end_pos >= len(input_ids) or start_pos < 0 or end_pos < 0:
+                        start_pos = end_pos = cls_index
+                    
+                    tokenized_examples["start_positions"].append(int(start_pos))
+                    tokenized_examples["end_positions"].append(int(end_pos))
 
         return tokenized_examples
 
