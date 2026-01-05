@@ -112,60 +112,80 @@ def find_or_download_vncorenlp(jar_path: Optional[str] = None) -> Optional[str]:
     logger.info("VnCoreNLP jar not found. Downloading using command line...")
     
     vncorenlp_dir = "vncorenlp"
-    os.makedirs(vncorenlp_dir, exist_ok=True)
+    models_dir = os.path.join(vncorenlp_dir, "models", "wordsegmenter")
     
-    jar_file = os.path.join(vncorenlp_dir, "VnCoreNLP-1.1.1.jar")
+    # Tạo thư mục
+    os.makedirs(models_dir, exist_ok=True)
+    logger.info(f"Created directory: {models_dir}")
+    
+    # URLs
     jar_url = "https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/VnCoreNLP-1.1.1.jar"
+    vi_vocab_url = "https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/models/wordsegmenter/vi-vocab"
+    wordsegmenter_rdr_url = "https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/models/wordsegmenter/wordsegmenter.rdr"
     
-    # Tải jar file bằng wget hoặc curl
+    # File paths
+    jar_file = os.path.join(vncorenlp_dir, "VnCoreNLP-1.1.1.jar")
+    vi_vocab_file = os.path.join(models_dir, "vi-vocab")
+    wordsegmenter_rdr_file = os.path.join(models_dir, "wordsegmenter.rdr")
+    
+    # Temporary download paths
+    temp_jar = "VnCoreNLP-1.1.1.jar"
+    temp_vi_vocab = "vi-vocab"
+    temp_wordsegmenter_rdr = "wordsegmenter.rdr"
+    
     try:
         # Kiểm tra xem có wget hay curl không
         has_wget = shutil.which("wget") is not None
         has_curl = shutil.which("curl") is not None
         
+        if not has_wget and not has_curl:
+            logger.error("Neither wget nor curl found. Please install one of them.")
+            logger.warning("Will continue without word segmentation")
+            return None
+        
+        # Tải VnCoreNLP-1.1.1.jar
+        logger.info(f"Downloading VnCoreNLP-1.1.1.jar...")
         if has_wget:
-            logger.info(f"Downloading VnCoreNLP jar using wget...")
-            subprocess.run(["wget", jar_url, "-O", jar_file], check=True)
-        elif has_curl:
-            logger.info(f"Downloading VnCoreNLP jar using curl...")
-            subprocess.run(["curl", "-L", jar_url, "-o", jar_file], check=True)
+            subprocess.run(["wget", jar_url, "-O", temp_jar], check=True)
         else:
-            # Fallback to urllib if wget/curl not available
-            logger.warning("wget/curl not found, using urllib as fallback...")
-            urllib.request.urlretrieve(jar_url, jar_file)
+            subprocess.run(["curl", "-L", jar_url, "-o", temp_jar], check=True)
         
-        logger.info(f"Downloaded VnCoreNLP jar to: {jar_file}")
+        # Di chuyển jar file vào thư mục vncorenlp
+        if os.path.exists(temp_jar):
+            shutil.move(temp_jar, jar_file)
+            logger.info(f"Downloaded and moved VnCoreNLP jar to: {jar_file}")
         
-        # Tải thêm các file cần thiết cho word segmentation
-        models_dir = os.path.join(vncorenlp_dir, "models", "wordsegmenter")
-        os.makedirs(models_dir, exist_ok=True)
-        
-        vi_vocab_url = "https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/models/wordsegmenter/vi-vocab"
-        wordsegmenter_rdr_url = "https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/models/wordsegmenter/wordsegmenter.rdr"
-        
-        vi_vocab_file = os.path.join(models_dir, "vi-vocab")
-        wordsegmenter_rdr_file = os.path.join(models_dir, "wordsegmenter.rdr")
-        
+        # Tải vi-vocab
         if not os.path.exists(vi_vocab_file):
             logger.info("Downloading vi-vocab...")
             if has_wget:
-                subprocess.run(["wget", vi_vocab_url, "-O", vi_vocab_file], check=True)
-            elif has_curl:
-                subprocess.run(["curl", "-L", vi_vocab_url, "-o", vi_vocab_file], check=True)
+                subprocess.run(["wget", vi_vocab_url, "-O", temp_vi_vocab], check=True)
             else:
-                urllib.request.urlretrieve(vi_vocab_url, vi_vocab_file)
+                subprocess.run(["curl", "-L", vi_vocab_url, "-o", temp_vi_vocab], check=True)
+            
+            if os.path.exists(temp_vi_vocab):
+                shutil.move(temp_vi_vocab, vi_vocab_file)
+                logger.info(f"Downloaded and moved vi-vocab to: {vi_vocab_file}")
         
+        # Tải wordsegmenter.rdr
         if not os.path.exists(wordsegmenter_rdr_file):
             logger.info("Downloading wordsegmenter.rdr...")
             if has_wget:
-                subprocess.run(["wget", wordsegmenter_rdr_url, "-O", wordsegmenter_rdr_file], check=True)
-            elif has_curl:
-                subprocess.run(["curl", "-L", wordsegmenter_rdr_url, "-o", wordsegmenter_rdr_file], check=True)
+                subprocess.run(["wget", wordsegmenter_rdr_url, "-O", temp_wordsegmenter_rdr], check=True)
             else:
-                urllib.request.urlretrieve(wordsegmenter_rdr_url, wordsegmenter_rdr_file)
+                subprocess.run(["curl", "-L", wordsegmenter_rdr_url, "-o", temp_wordsegmenter_rdr], check=True)
+            
+            if os.path.exists(temp_wordsegmenter_rdr):
+                shutil.move(temp_wordsegmenter_rdr, wordsegmenter_rdr_file)
+                logger.info(f"Downloaded and moved wordsegmenter.rdr to: {wordsegmenter_rdr_file}")
         
-        logger.info("VnCoreNLP setup completed")
-        return jar_file
+        # Kiểm tra xem jar file đã tồn tại chưa
+        if os.path.exists(jar_file):
+            logger.info("VnCoreNLP setup completed successfully")
+            return jar_file
+        else:
+            logger.error("Failed to download VnCoreNLP jar file")
+            return None
         
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to download VnCoreNLP using command line: {e}")
