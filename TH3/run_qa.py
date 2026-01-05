@@ -24,6 +24,9 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
+# Set TOKENIZERS_PARALLELISM to avoid warnings when using multiprocessing
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import datasets
 import evaluate
 from datasets import load_dataset
@@ -375,6 +378,17 @@ def main():
             "Try upgrading transformers/tokenizers or ensure tokenizer.json is available in the model repo/cache."
         )
 
+    # Update tokenizer.model_max_length to match config.max_position_embeddings if needed
+    # This is important for models like PhoBERT that have small max_position_embeddings (e.g., 258)
+    # but the fallback tokenizer (RobertaTokenizerFast) might have a larger default model_max_length
+    if hasattr(config, 'max_position_embeddings') and config.max_position_embeddings > 0:
+        if tokenizer.model_max_length > config.max_position_embeddings:
+            logger.info(
+                f"Updating tokenizer.model_max_length from {tokenizer.model_max_length} to "
+                f"{config.max_position_embeddings} to match model's max_position_embeddings."
+            )
+            tokenizer.model_max_length = config.max_position_embeddings
+
     # Preprocessing the datasets.
     # Preprocessing is slightly different for training and evaluation.
     if training_args.do_train:
@@ -390,12 +404,21 @@ def main():
     # Padding side determines if we do (question|context) or (context|question).
     pad_on_right = tokenizer.padding_side == "right"
 
-    if data_args.max_seq_length > tokenizer.model_max_length:
+    # Check both tokenizer.model_max_length and config.max_position_embeddings
+    # Some models like PhoBERT have very small max_position_embeddings (e.g., 258)
+    # but the tokenizer might have a larger model_max_length
+    model_max_length = min(
+        tokenizer.model_max_length if tokenizer.model_max_length > 0 else float('inf'),
+        config.max_position_embeddings if hasattr(config, 'max_position_embeddings') else float('inf')
+    )
+    
+    if data_args.max_seq_length > model_max_length:
         logger.warning(
             f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the "
-            f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
+            f"model (tokenizer: {tokenizer.model_max_length}, config: {getattr(config, 'max_position_embeddings', 'N/A')}). "
+            f"Using max_seq_length={model_max_length}."
         )
-    max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    max_seq_length = min(data_args.max_seq_length, model_max_length)
 
     # Training preprocessing
     def prepare_train_features(examples):
