@@ -153,9 +153,13 @@ def get_raw_scores(dataset, preds):
 def apply_no_ans_threshold(scores, na_probs, qid_to_has_ans, na_prob_thresh):
   new_scores = {}
   for qid, s in scores.items():
-    pred_na = na_probs[qid] > na_prob_thresh
+    # Handle missing na_probs (default to 0.0)
+    na_prob = na_probs.get(qid, 0.0)
+    pred_na = na_prob > na_prob_thresh
     if pred_na:
-      new_scores[qid] = float(not qid_to_has_ans[qid])
+      # If qid not in qid_to_has_ans, assume it has an answer
+      has_ans = qid_to_has_ans.get(qid, True)
+      new_scores[qid] = float(not has_ans)
     else:
       new_scores[qid] = s
   return new_scores
@@ -169,10 +173,18 @@ def make_eval_dict(exact_scores, f1_scores, qid_list=None):
         ('total', total),
     ])
   else:
-    total = len(qid_list)
+    # Only include qids that exist in both exact_scores and f1_scores
+    valid_qids = [k for k in qid_list if k in exact_scores and k in f1_scores]
+    if not valid_qids:
+      return collections.OrderedDict([
+          ('exact', 0.0),
+          ('f1', 0.0),
+          ('total', 0),
+      ])
+    total = len(valid_qids)
     return collections.OrderedDict([
-        ('exact', 100.0 * sum(exact_scores[k] for k in qid_list) / total),
-        ('f1', 100.0 * sum(f1_scores[k] for k in qid_list) / total),
+        ('exact', 100.0 * sum(exact_scores[k] for k in valid_qids) / total),
+        ('f1', 100.0 * sum(f1_scores[k] for k in valid_qids) / total),
         ('total', total),
     ])
 
@@ -291,9 +303,13 @@ def main():
   else:
     na_probs = {k: 0.0 for k in preds}
   qid_to_has_ans = make_qid_to_has_ans(dataset)  # maps qid to True/False
-  has_ans_qids = [k for k, v in qid_to_has_ans.items() if v]
-  no_ans_qids = [k for k, v in qid_to_has_ans.items() if not v]
   exact_raw, f1_raw = get_raw_scores(dataset, preds)
+  
+  # Only evaluate on qids that have predictions
+  pred_qids = set(exact_raw.keys())
+  has_ans_qids = [k for k, v in qid_to_has_ans.items() if v and k in pred_qids]
+  no_ans_qids = [k for k, v in qid_to_has_ans.items() if not v and k in pred_qids]
+  
   exact_thresh = apply_no_ans_threshold(exact_raw, na_probs, qid_to_has_ans,
                                         OPTS.na_prob_thresh)
   f1_thresh = apply_no_ans_threshold(f1_raw, na_probs, qid_to_has_ans,
