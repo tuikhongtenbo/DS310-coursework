@@ -378,17 +378,6 @@ def main():
             "Try upgrading transformers/tokenizers or ensure tokenizer.json is available in the model repo/cache."
         )
 
-    # Update tokenizer.model_max_length to match config.max_position_embeddings if needed
-    # This is important for models like PhoBERT that have small max_position_embeddings (e.g., 258)
-    # but the fallback tokenizer (RobertaTokenizerFast) might have a larger default model_max_length
-    if hasattr(config, 'max_position_embeddings') and config.max_position_embeddings > 0:
-        if tokenizer.model_max_length > config.max_position_embeddings:
-            logger.info(
-                f"Updating tokenizer.model_max_length from {tokenizer.model_max_length} to "
-                f"{config.max_position_embeddings} to match model's max_position_embeddings."
-            )
-            tokenizer.model_max_length = config.max_position_embeddings
-
     # Preprocessing the datasets.
     # Preprocessing is slightly different for training and evaluation.
     if training_args.do_train:
@@ -404,21 +393,38 @@ def main():
     # Padding side determines if we do (question|context) or (context|question).
     pad_on_right = tokenizer.padding_side == "right"
 
-    # Check both tokenizer.model_max_length and config.max_position_embeddings
-    # Some models like PhoBERT have very small max_position_embeddings (e.g., 258)
-    # but the tokenizer might have a larger model_max_length
-    model_max_length = min(
-        tokenizer.model_max_length if tokenizer.model_max_length > 0 else float('inf'),
-        config.max_position_embeddings if hasattr(config, 'max_position_embeddings') else float('inf')
-    )
-    
+    # ----- FIX for RoBERTa/PhoBERT position embedding range -----
+    # RoBERTa position_ids start at (pad_token_id + 1) => effective max length is smaller than max_position_embeddings
+    # For example: PhoBERT has max_position_embeddings=258, pad_token_id=1
+    # position_ids start at 2, so max position is 258-1=257, meaning max_seq_length should be 256
+    config_max_pos = getattr(config, "max_position_embeddings", None)
+
+    # tokenizer.pad_token_id is 1 for RoBERTa/PhoBERT
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 1
+    pos_offset = pad_id + 1  # e.g. 2 for RoBERTa/PhoBERT
+
+    if config_max_pos is not None and config_max_pos > 0:
+        effective_max_from_config = max(1, config_max_pos - pos_offset)
+    else:
+        effective_max_from_config = data_args.max_seq_length  # fallback
+
+    # tokenizer.model_max_length can be huge; keep it but respect effective config max
+    tokenizer_max = tokenizer.model_max_length if getattr(tokenizer, "model_max_length", 0) and tokenizer.model_max_length > 0 else 10**9
+    model_max_length = min(tokenizer_max, effective_max_from_config)
+
     if data_args.max_seq_length > model_max_length:
         logger.warning(
-            f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the "
-            f"model (tokenizer: {tokenizer.model_max_length}, config: {getattr(config, 'max_position_embeddings', 'N/A')}). "
+            f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the effective maximum length for "
+            f"this model (effective={model_max_length}, config.max_position_embeddings={config_max_pos}, pos_offset={pos_offset}). "
             f"Using max_seq_length={model_max_length}."
         )
+
     max_seq_length = min(data_args.max_seq_length, model_max_length)
+
+    # Also update tokenizer.model_max_length to match effective limit (avoid later accidental oversize)
+    if getattr(tokenizer, "model_max_length", None) and tokenizer.model_max_length > model_max_length:
+        tokenizer.model_max_length = model_max_length
+    # ----- END FIX -----
 
     # Training preprocessing
     def prepare_train_features(examples):
@@ -440,6 +446,18 @@ def main():
             return_offsets_mapping=True,
             padding="max_length" if data_args.pad_to_max_length else False,
         )
+
+        # Debug safety checks: verify token ids are within vocab size
+        vocab_size = config.vocab_size
+        if len(tokenized_examples["input_ids"]) > 0:
+            # Check first few examples for token id out of vocab
+            for idx, ids in enumerate(tokenized_examples["input_ids"][:5]):
+                max_id = max(ids) if ids else 0
+                if max_id >= vocab_size:
+                    raise ValueError(
+                        f"Found token id {max_id} >= vocab_size {vocab_size} in example {idx}. "
+                        f"Tokenizer/model vocab mismatch. Check tokenizer configuration."
+                    )
 
         # Since one example might give us several features if it has a long context, we need a map from a feature to
         # its corresponding example. This key gives us just that.
@@ -546,6 +564,18 @@ def main():
             return_offsets_mapping=True,
             padding="max_length" if data_args.pad_to_max_length else False,
         )
+
+        # Debug safety checks: verify token ids are within vocab size
+        vocab_size = config.vocab_size
+        if len(tokenized_examples["input_ids"]) > 0:
+            # Check first few examples for token id out of vocab
+            for idx, ids in enumerate(tokenized_examples["input_ids"][:5]):
+                max_id = max(ids) if ids else 0
+                if max_id >= vocab_size:
+                    raise ValueError(
+                        f"Found token id {max_id} >= vocab_size {vocab_size} in example {idx}. "
+                        f"Tokenizer/model vocab mismatch. Check tokenizer configuration."
+                    )
 
         # Since one example might give us several features if it has a long context, we need a map from a feature to
         # its corresponding example. This key gives us just that.
