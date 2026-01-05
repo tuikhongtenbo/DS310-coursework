@@ -14,7 +14,10 @@ import re
 import string
 import sys
 
+from logger import setup_logger
+
 OPTS = None
+logger = None
 
 def parse_args():
   parser = argparse.ArgumentParser('Official evaluation script for SQuAD version 2.0.')
@@ -29,6 +32,8 @@ def parse_args():
   parser.add_argument('--out-image-dir', '-p', metavar='out_images', default=None,
                       help='Save precision-recall curves to directory.')
   parser.add_argument('--verbose', '-v', action='store_true')
+  parser.add_argument('--log-dir', type=str, default='./logs',
+                      help='Directory to save log files')
   if len(sys.argv) == 1:
     parser.print_help()
     sys.exit(1)
@@ -99,6 +104,7 @@ def compute_f1(a_gold, a_pred):
   return f1
 
 def get_raw_scores(dataset, preds):
+  global logger
   exact_scores = {}
   f1_scores = {}
   # Check if dataset is in flat format (list of items with id, question, answers)
@@ -124,7 +130,10 @@ def get_raw_scores(dataset, preds):
         # For unanswerable questions, only correct answer is empty string
         gold_answers = ['']
       if qid not in preds:
-        print('Missing prediction for %s' % qid)
+        if logger:
+          logger.warning('Missing prediction for %s' % qid)
+        else:
+          print('Missing prediction for %s' % qid)
         continue
       a_pred = preds[qid]
       # Take max over all gold answers
@@ -142,7 +151,10 @@ def get_raw_scores(dataset, preds):
             # For unanswerable questions, only correct answer is empty string
             gold_answers = ['']
           if qid not in preds:
-            print('Missing prediction for %s' % qid)
+            if logger:
+              logger.warning('Missing prediction for %s' % qid)
+            else:
+              print('Missing prediction for %s' % qid)
             continue
           a_pred = preds[qid]
           # Take max over all gold answers
@@ -292,16 +304,29 @@ def find_all_best_thresh(main_eval, preds, exact_raw, f1_raw, na_probs, qid_to_h
   main_eval['best_f1_thresh'] = f1_thresh
 
 def main():
+  global logger
+  logger = setup_logger("evaluation", log_dir=OPTS.log_dir)
+  
+  logger.info(f"Loading dataset from {OPTS.data_file}")
   with open(OPTS.data_file) as f:
     dataset_json = json.load(f)
     dataset = dataset_json['data']
+  
+  logger.info(f"Loading predictions from {OPTS.pred_file}")
   with open(OPTS.pred_file) as f:
     preds = json.load(f)
+  
   if OPTS.na_prob_file:
+    logger.info(f"Loading no-answer probabilities from {OPTS.na_prob_file}")
     with open(OPTS.na_prob_file) as f:
       na_probs = json.load(f)
   else:
+    logger.info("No na_prob_file provided, using default 0.0 for all questions")
     na_probs = {k: 0.0 for k in preds}
+  
+  logger.info(f"Dataset contains {len(dataset)} examples")
+  logger.info(f"Predictions contain {len(preds)} entries")
+  
   qid_to_has_ans = make_qid_to_has_ans(dataset)  # maps qid to True/False
   exact_raw, f1_raw = get_raw_scores(dataset, preds)
   
@@ -309,6 +334,10 @@ def main():
   pred_qids = set(exact_raw.keys())
   has_ans_qids = [k for k, v in qid_to_has_ans.items() if v and k in pred_qids]
   no_ans_qids = [k for k, v in qid_to_has_ans.items() if not v and k in pred_qids]
+  
+  logger.info(f"Evaluating on {len(pred_qids)} questions with predictions")
+  logger.info(f"  Has answer: {len(has_ans_qids)}")
+  logger.info(f"  No answer: {len(no_ans_qids)}")
   
   exact_thresh = apply_no_ans_threshold(exact_raw, na_probs, qid_to_has_ans,
                                         OPTS.na_prob_thresh)
@@ -324,13 +353,26 @@ def main():
   if OPTS.na_prob_file:
     find_all_best_thresh(out_eval, preds, exact_raw, f1_raw, na_probs, qid_to_has_ans)
   if OPTS.na_prob_file and OPTS.out_image_dir:
+    logger.info(f"Generating precision-recall curves in {OPTS.out_image_dir}")
     run_precision_recall_analysis(out_eval, exact_raw, f1_raw, na_probs, 
                                   qid_to_has_ans, OPTS.out_image_dir)
     histogram_na_prob(na_probs, has_ans_qids, OPTS.out_image_dir, 'hasAns')
     histogram_na_prob(na_probs, no_ans_qids, OPTS.out_image_dir, 'noAns')
+  
+  logger.info("Evaluation Results:")
+  logger.info(f"  Exact Match: {out_eval.get('exact', 0):.2f}%")
+  logger.info(f"  F1 Score: {out_eval.get('f1', 0):.2f}%")
+  if 'HasAns_exact' in out_eval:
+    logger.info(f"  HasAns - Exact: {out_eval.get('HasAns_exact', 0):.2f}%")
+    logger.info(f"  HasAns - F1: {out_eval.get('HasAns_f1', 0):.2f}%")
+  if 'NoAns_exact' in out_eval:
+    logger.info(f"  NoAns - Exact: {out_eval.get('NoAns_exact', 0):.2f}%")
+    logger.info(f"  NoAns - F1: {out_eval.get('NoAns_f1', 0):.2f}%")
+  
   if OPTS.out_file:
+    logger.info(f"Saving evaluation results to {OPTS.out_file}")
     with open(OPTS.out_file, 'w') as f:
-      json.dump(out_eval, f)
+      json.dump(out_eval, f, indent=2)
   else:
     print(json.dumps(out_eval, indent=2))
 
