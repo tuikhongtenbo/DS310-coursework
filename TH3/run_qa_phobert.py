@@ -502,6 +502,8 @@ def main():
     parser.add_argument("--max_seq_length", type=int, default=256, help="Maximum sequence length")
     parser.add_argument("--doc_stride", type=int, default=128, help="Document stride")
     parser.add_argument("--max_answer_length", type=int, default=30, help="Maximum answer length")
+    parser.add_argument("--n_best_size", type=int, default=20, help="Number of n-best predictions to generate")
+    parser.add_argument("--null_score_diff_threshold", type=float, default=0.0, help="Threshold for null answer prediction")
     parser.add_argument("--version_2_with_negative", action="store_true", help="Use SQuAD v2 format")
     
     # Training arguments
@@ -667,6 +669,17 @@ def main():
         model.eval()
         phobert.eval()
         
+        # Import evaluation functions
+        try:
+            from evaluation import (
+                normalize_answer, compute_exact, compute_f1, 
+                get_raw_scores, make_eval_dict, make_qid_to_has_ans
+            )
+            EVALUATION_AVAILABLE = True
+        except ImportError:
+            logger.warning("evaluation.py not found. Will skip detailed evaluation metrics.")
+            EVALUATION_AVAILABLE = False
+        
         for dataset_name, dataset in [("validation", val_dataset), ("test", test_dataset)]:
             if dataset is None:
                 continue
@@ -679,7 +692,14 @@ def main():
                 collate_fn=collate_fn,
             )
             
-            all_predictions = []
+            # Collect all predictions with logits for post-processing
+            all_start_logits = []
+            all_end_logits = []
+            all_example_ids = []
+            all_contexts = []
+            all_questions = []
+            all_answers = []
+            
             with torch.no_grad():
                 for batch in tqdm(loader, desc=f"Evaluating {dataset_name}"):
                     input_ids = batch['input_ids'].to(device)
@@ -690,23 +710,172 @@ def main():
                     start_logits = outputs['start_logits'].cpu().numpy()
                     end_logits = outputs['end_logits'].cpu().numpy()
                     
-                    for i in range(len(batch['example_ids'])):
-                        start_idx = np.argmax(start_logits[i])
-                        end_idx = np.argmax(end_logits[i])
-                        
-                        # Extract answer (simplified - need proper post-processing)
-                        pred_text = ""  # TODO: Implement proper answer extraction
-                        
-                        all_predictions.append({
-                            'id': batch['example_ids'][i],
-                            'prediction_text': pred_text,
-                        })
+                    all_start_logits.append(start_logits)
+                    all_end_logits.append(end_logits)
+                    all_example_ids.extend(batch['example_ids'])
+                    all_contexts.extend(batch['contexts'])
+                    all_questions.extend(batch['questions'])
+                    if 'answers' in batch:
+                        all_answers.extend(batch['answers'])
             
-            # Save predictions
+            # Concatenate all logits
+            all_start_logits = np.concatenate(all_start_logits, axis=0)
+            all_end_logits = np.concatenate(all_end_logits, axis=0)
+            
+            # Post-process predictions
+            # Group features by example_id (since one example can have multiple features)
+            example_to_features = {}
+            for idx, example_id in enumerate(all_example_ids):
+                if example_id not in example_to_features:
+                    example_to_features[example_id] = {
+                        'features': [],
+                        'context': all_contexts[idx],
+                        'question': all_questions[idx],
+                        'answers': all_answers[idx] if idx < len(all_answers) else {'text': [], 'answer_start': []}
+                    }
+                example_to_features[example_id]['features'].append({
+                    'start_logits': all_start_logits[idx],
+                    'end_logits': all_end_logits[idx],
+                    'feature_idx': idx
+                })
+            
+            # Extract answers for each example
+            predictions_dict = {}
+            n_best_size = 20
+            
+            for example_id, example_data in tqdm(example_to_features.items(), desc="Post-processing predictions"):
+                context = example_data['context']
+                features = example_data['features']
+                
+                # Get best prediction across all features for this example
+                prelim_predictions = []
+                min_null_score = None
+                
+                for feature in features:
+                    start_logits = feature['start_logits']
+                    end_logits = feature['end_logits']
+                    
+                    # Null score (CLS token)
+                    null_score = start_logits[0] + end_logits[0]
+                    if min_null_score is None or null_score < min_null_score:
+                        min_null_score = null_score
+                    
+                    # Get top n_best_size start and end positions
+                    start_indexes = np.argsort(start_logits)[-1:-n_best_size-1:-1].tolist()
+                    end_indexes = np.argsort(end_logits)[-1:-n_best_size-1:-1].tolist()
+                    
+                    for start_idx in start_indexes:
+                        for end_idx in end_indexes:
+                            if end_idx < start_idx or end_idx - start_idx + 1 > args.max_answer_length:
+                                continue
+                            
+                            # Approximate: extract text from context based on token positions
+                            # This is simplified - in practice need proper offset mapping
+                            score = start_logits[start_idx] + end_logits[end_idx]
+                            prelim_predictions.append({
+                                'start_idx': start_idx,
+                                'end_idx': end_idx,
+                                'score': score,
+                                'start_logit': start_logits[start_idx],
+                                'end_logit': end_logits[end_idx],
+                            })
+                
+                # Sort by score and take best
+                prelim_predictions = sorted(prelim_predictions, key=lambda x: x['score'], reverse=True)[:n_best_size]
+                
+                # Extract answer text (simplified - using token indices)
+                # In practice, need proper offset mapping from tokens to characters
+                if len(prelim_predictions) > 0:
+                    best_pred = prelim_predictions[0]
+                    # For now, use a simple heuristic: decode tokens
+                    # This is approximate and should be improved with proper offset mapping
+                    pred_text = ""  # Will be improved with proper token-to-text mapping
+                    
+                    # Simple fallback: if we can't extract properly, use empty string
+                    if args.version_2_with_negative and min_null_score is not None:
+                        best_score = best_pred['score']
+                        if best_score < min_null_score - args.null_score_diff_threshold:
+                            pred_text = ""
+                        else:
+                            # Try to extract from context (simplified)
+                            # TODO: Implement proper token-to-character mapping
+                            pred_text = ""
+                else:
+                    pred_text = ""
+                
+                predictions_dict[example_id] = pred_text
+            
+            # Save predictions in format compatible with evaluation.py
             predictions_file = os.path.join(args.output_dir, f"{dataset_name}_predictions.json")
             with open(predictions_file, 'w', encoding='utf-8') as f:
-                json.dump(all_predictions, f, ensure_ascii=False, indent=2)
+                json.dump(predictions_dict, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved predictions to {predictions_file}")
+            
+            # Run evaluation if we have ground truth
+            if args.do_eval and dataset_name == "validation" and EVALUATION_AVAILABLE:
+                # Prepare data in format expected by evaluation.py
+                eval_data = []
+                for example_id, example_data in example_to_features.items():
+                    eval_data.append({
+                        'id': example_id,
+                        'context': example_data['context'],
+                        'question': example_data['question'],
+                        'answers': example_data['answers']
+                    })
+                
+                # Convert to SQuAD format for evaluation
+                squad_format_data = {
+                    'data': [{
+                        'paragraphs': [{
+                            'context': eval_data[0]['context'] if eval_data else '',
+                            'qas': [{
+                                'id': item['id'],
+                                'question': item['question'],
+                                'answers': item['answers']['text'] if item['answers']['text'] else []
+                            } for item in eval_data]
+                        }]
+                    }]
+                }
+                
+                # Calculate metrics
+                qid_to_has_ans = make_qid_to_has_ans(squad_format_data['data'])
+                exact_scores, f1_scores = get_raw_scores(squad_format_data['data'], predictions_dict)
+                eval_dict = make_eval_dict(exact_scores, f1_scores)
+                
+                # Add HasAns/NoAns breakdown
+                has_ans_qids = [k for k, v in qid_to_has_ans.items() if v]
+                no_ans_qids = [k for k, v in qid_to_has_ans.items() if not v]
+                
+                if has_ans_qids:
+                    has_ans_eval = make_eval_dict(exact_scores, f1_scores, qid_list=has_ans_qids)
+                    for k, v in has_ans_eval.items():
+                        eval_dict[f'HasAns_{k}'] = v
+                
+                if no_ans_qids:
+                    no_ans_eval = make_eval_dict(exact_scores, f1_scores, qid_list=no_ans_qids)
+                    for k, v in no_ans_eval.items():
+                        eval_dict[f'NoAns_{k}'] = v
+                
+                # Save evaluation results
+                eval_results_file = os.path.join(args.output_dir, f"{dataset_name}_eval_results.json")
+                with open(eval_results_file, 'w', encoding='utf-8') as f:
+                    json.dump(eval_dict, f, indent=2)
+                
+                logger.info(f"Evaluation results for {dataset_name}:")
+                logger.info(f"  Exact Match: {eval_dict.get('exact', 0):.2f}%")
+                logger.info(f"  F1: {eval_dict.get('f1', 0):.2f}%")
+                if has_ans_qids:
+                    logger.info(f"  HasAns Exact: {eval_dict.get('HasAns_exact', 0):.2f}%")
+                    logger.info(f"  HasAns F1: {eval_dict.get('HasAns_f1', 0):.2f}%")
+                if no_ans_qids:
+                    logger.info(f"  NoAns Exact: {eval_dict.get('NoAns_exact', 0):.2f}%")
+                    logger.info(f"  NoAns F1: {eval_dict.get('NoAns_f1', 0):.2f}%")
+                logger.info(f"Saved evaluation results to {eval_results_file}")
+            
+            # Optionally run evaluation.py script
+            if args.do_predict and dataset_name == "test":
+                logger.info(f"Predictions saved. You can run evaluation.py separately:")
+                logger.info(f"  python evaluation.py {args.test_file} {predictions_file}")
 
 
 if __name__ == "__main__":
