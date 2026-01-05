@@ -36,10 +36,30 @@ def parse_args():
 
 def make_qid_to_has_ans(dataset):
   qid_to_has_ans = {}
-  for article in dataset:
-    for p in article['paragraphs']:
-      for qa in p['qas']:
-        qid_to_has_ans[qa['id']] = bool(qa['answers'])
+  # Check if dataset is in flat format (list of items with id, question, answers)
+  if len(dataset) > 0 and isinstance(dataset[0], dict) and 'id' in dataset[0] and 'question' in dataset[0]:
+    # Flat format
+    for item in dataset:
+      qid = item['id']
+      # Check if answers exist and are not empty
+      if 'answers' in item:
+        if isinstance(item['answers'], dict):
+          # Format: {"text": [...], "answer_start": [...]}
+          has_ans = bool(item['answers'].get('text', []))
+        elif isinstance(item['answers'], list):
+          # Format: [{"text": "...", "answer_start": ...}, ...]
+          has_ans = bool(item['answers'])
+        else:
+          has_ans = False
+      else:
+        has_ans = False
+      qid_to_has_ans[qid] = has_ans
+  else:
+    # Nested SQuAD format
+    for article in dataset:
+      for p in article['paragraphs']:
+        for qa in p['qas']:
+          qid_to_has_ans[qa['id']] = bool(qa['answers'])
   return qid_to_has_ans
 
 def normalize_answer(s):
@@ -81,22 +101,53 @@ def compute_f1(a_gold, a_pred):
 def get_raw_scores(dataset, preds):
   exact_scores = {}
   f1_scores = {}
-  for article in dataset:
-    for p in article['paragraphs']:
-      for qa in p['qas']:
-        qid = qa['id']
-        gold_answers = [a['text'] for a in qa['answers']
-                        if normalize_answer(a['text'])]
-        if not gold_answers:
-          # For unanswerable questions, only correct answer is empty string
-          gold_answers = ['']
-        if qid not in preds:
-          print('Missing prediction for %s' % qid)
-          continue
-        a_pred = preds[qid]
-        # Take max over all gold answers
-        exact_scores[qid] = max(compute_exact(a, a_pred) for a in gold_answers)
-        f1_scores[qid] = max(compute_f1(a, a_pred) for a in gold_answers)
+  # Check if dataset is in flat format (list of items with id, question, answers)
+  if len(dataset) > 0 and isinstance(dataset[0], dict) and 'id' in dataset[0] and 'question' in dataset[0]:
+    # Flat format
+    for item in dataset:
+      qid = item['id']
+      # Extract gold answers
+      if 'answers' in item:
+        if isinstance(item['answers'], dict):
+          # Format: {"text": [...], "answer_start": [...]}
+          gold_answers = [a for a in item['answers'].get('text', [])
+                          if normalize_answer(a)]
+        elif isinstance(item['answers'], list):
+          # Format: [{"text": "...", "answer_start": ...}, ...]
+          gold_answers = [a['text'] for a in item['answers']
+                          if normalize_answer(a['text'])]
+        else:
+          gold_answers = []
+      else:
+        gold_answers = []
+      if not gold_answers:
+        # For unanswerable questions, only correct answer is empty string
+        gold_answers = ['']
+      if qid not in preds:
+        print('Missing prediction for %s' % qid)
+        continue
+      a_pred = preds[qid]
+      # Take max over all gold answers
+      exact_scores[qid] = max(compute_exact(a, a_pred) for a in gold_answers)
+      f1_scores[qid] = max(compute_f1(a, a_pred) for a in gold_answers)
+  else:
+    # Nested SQuAD format
+    for article in dataset:
+      for p in article['paragraphs']:
+        for qa in p['qas']:
+          qid = qa['id']
+          gold_answers = [a['text'] for a in qa['answers']
+                          if normalize_answer(a['text'])]
+          if not gold_answers:
+            # For unanswerable questions, only correct answer is empty string
+            gold_answers = ['']
+          if qid not in preds:
+            print('Missing prediction for %s' % qid)
+            continue
+          a_pred = preds[qid]
+          # Take max over all gold answers
+          exact_scores[qid] = max(compute_exact(a, a_pred) for a in gold_answers)
+          f1_scores[qid] = max(compute_f1(a, a_pred) for a in gold_answers)
   return exact_scores, f1_scores
 
 def apply_no_ans_threshold(scores, na_probs, qid_to_has_ans, na_prob_thresh):
