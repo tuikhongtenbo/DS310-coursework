@@ -38,6 +38,7 @@ from transformers import (
     DataCollatorWithPadding,
     EvalPrediction,
     HfArgumentParser,
+    RobertaTokenizerFast,
     TrainingArguments,
     default_data_collator,
     set_seed,
@@ -52,6 +53,45 @@ check_min_version("4.57.0.dev0")
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/question-answering/requirements.txt")
 
 logger = logging.getLogger(__name__)
+
+
+def load_tokenizer_with_phobert_fallback(model_args):
+    """
+    Load tokenizer with fallback to RobertaTokenizerFast for PhoBERT models.
+    PhoBERT doesn't have a native fast tokenizer, but RobertaTokenizerFast can work
+    since PhoBERT uses RoBERTa-BPE architecture and has tokenizer.json.
+    """
+    # 1) Try normal fast tokenizer
+    tok = AutoTokenizer.from_pretrained(
+        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        use_fast=True,  # keep true
+        revision=model_args.model_revision,
+        token=model_args.token,
+        trust_remote_code=model_args.trust_remote_code,
+    )
+
+    # 2) If it's not fast, try PhoBERT -> RobertaTokenizerFast fallback (tokenizer.json exists)
+    if not getattr(tok, "is_fast", False):
+        # Heuristic: PhoBERT typically declares tokenizer_class = "PhobertTokenizer"
+        # and model_name contains "phobert"
+        name = (model_args.tokenizer_name or model_args.model_name_or_path or "").lower()
+        is_phobert = ("phobert" in name) or (tok.__class__.__name__.lower() == "phoberttokenizer")
+
+        if is_phobert:
+            logger.warning(
+                "PhoBERT does not provide a native *Fast* tokenizer in this Transformers version. "
+                "Falling back to RobertaTokenizerFast so we can use offsets_mapping."
+            )
+            tok = RobertaTokenizerFast.from_pretrained(
+                model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+                cache_dir=model_args.cache_dir,
+                revision=model_args.model_revision,
+                token=model_args.token,
+                trust_remote_code=model_args.trust_remote_code,
+            )
+
+    return tok
 
 
 @dataclass
@@ -315,14 +355,7 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_fast=True,
-        revision=model_args.model_revision,
-        token=model_args.token,
-        trust_remote_code=model_args.trust_remote_code,
-    )
+    tokenizer = load_tokenizer_with_phobert_fallback(model_args)
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -334,12 +367,12 @@ def main():
     )
 
     # Tokenizer check: this script requires a fast tokenizer.
-    # Check if tokenizer has _tokenizer attribute (from tokenizers library) or is_fast property
-    if not (hasattr(tokenizer, "_tokenizer") or getattr(tokenizer, "is_fast", False)):
+    # QA pipeline needs fast tokenizer for offsets_mapping/sequence_ids
+    if not getattr(tokenizer, "is_fast", False):
         raise TypeError(
-            "This example script only works for models that have a fast tokenizer. Check out the big table of models at"
-            " https://huggingface.co/transformers/index.html#supported-frameworks to find the model types that meet"
-            " this requirement"
+            "This QA script requires a *fast* tokenizer because it uses offsets_mapping/sequence_ids. "
+            "Your tokenizer is still slow. For PhoBERT, the fallback to RobertaTokenizerFast may have failed. "
+            "Try upgrading transformers/tokenizers or ensure tokenizer.json is available in the model repo/cache."
         )
 
     # Preprocessing the datasets.
