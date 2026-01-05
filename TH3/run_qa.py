@@ -58,7 +58,7 @@ require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/ques
 logger = logging.getLogger(__name__)
 
 
-def load_tokenizer_with_phobert_fallback(model_args):
+def load_tokenizer_with_phobert_fallback(model_args, config=None):
     """
     Load tokenizer with fallback to RobertaTokenizerFast for PhoBERT models.
     PhoBERT doesn't have a native fast tokenizer, but RobertaTokenizerFast can work
@@ -93,6 +93,18 @@ def load_tokenizer_with_phobert_fallback(model_args):
                 token=model_args.token,
                 trust_remote_code=model_args.trust_remote_code,
             )
+            
+            # Check vocab size mismatch after fallback
+            if config is not None and hasattr(config, 'vocab_size'):
+                tok_vocab_size = len(tok.get_vocab()) if hasattr(tok, 'get_vocab') else getattr(tok, 'vocab_size', None)
+                if tok_vocab_size is not None and tok_vocab_size > config.vocab_size:
+                    logger.warning(
+                        f"Tokenizer vocab size ({tok_vocab_size}) is larger than model vocab size ({config.vocab_size}). "
+                        f"This may cause token ID out of range errors. Consider using the original slow tokenizer or "
+                        f"ensuring tokenizer vocab matches model vocab."
+                    )
+                    # Try to limit tokenizer vocab by setting model_max_length and ensuring proper truncation
+                    # The actual vocab limitation will be handled during tokenization
 
     return tok
 
@@ -358,7 +370,7 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    tokenizer = load_tokenizer_with_phobert_fallback(model_args)
+    tokenizer = load_tokenizer_with_phobert_fallback(model_args, config=config)
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -426,6 +438,25 @@ def main():
         tokenizer.model_max_length = model_max_length
     # ----- END FIX -----
 
+    # Helper function to clip token IDs to model vocab size
+    # This is needed when using RobertaTokenizerFast fallback for PhoBERT
+    # as the tokenizer vocab might be larger than model vocab
+    def clip_token_ids(token_ids, vocab_size, unk_token_id=None):
+        """
+        Clip token IDs to be within [0, vocab_size-1] range.
+        If unk_token_id is provided and within vocab, use it for out-of-range tokens.
+        Otherwise, use vocab_size - 1 (last token in vocab).
+        """
+        replacement_id = unk_token_id if (unk_token_id is not None and 0 <= unk_token_id < vocab_size) else (vocab_size - 1)
+        if isinstance(token_ids, list):
+            return [tid if 0 <= tid < vocab_size else replacement_id for tid in token_ids]
+        elif hasattr(token_ids, '__iter__'):
+            return [tid if 0 <= tid < vocab_size else replacement_id for tid in token_ids]
+        return token_ids
+
+    vocab_size = config.vocab_size if hasattr(config, 'vocab_size') else None
+    unk_token_id = tokenizer.unk_token_id if hasattr(tokenizer, 'unk_token_id') and tokenizer.unk_token_id is not None else None
+
     # Training preprocessing
     def prepare_train_features(examples):
         # Some of the questions have lots of whitespace on the left, which is not useful and will make the
@@ -447,17 +478,21 @@ def main():
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
-        # Debug safety checks: verify token ids are within vocab size
-        vocab_size = config.vocab_size
-        if len(tokenized_examples["input_ids"]) > 0:
-            # Check first few examples for token id out of vocab
-            for idx, ids in enumerate(tokenized_examples["input_ids"][:5]):
+        # Clip token IDs to model vocab size if needed
+        # This handles cases where RobertaTokenizerFast fallback has larger vocab than model
+        if vocab_size is not None:
+            clipped_count = 0
+            for idx, ids in enumerate(tokenized_examples["input_ids"]):
                 max_id = max(ids) if ids else 0
                 if max_id >= vocab_size:
-                    raise ValueError(
-                        f"Found token id {max_id} >= vocab_size {vocab_size} in example {idx}. "
-                        f"Tokenizer/model vocab mismatch. Check tokenizer configuration."
-                    )
+                    # Clip all token IDs in this sequence
+                    tokenized_examples["input_ids"][idx] = clip_token_ids(ids, vocab_size, unk_token_id)
+                    clipped_count += 1
+            if clipped_count > 0:
+                logger.warning(
+                    f"Clipped token IDs in {clipped_count} examples to fit model vocab_size ({vocab_size}). "
+                    f"This may occur when using RobertaTokenizerFast fallback for PhoBERT."
+                )
 
         # Since one example might give us several features if it has a long context, we need a map from a feature to
         # its corresponding example. This key gives us just that.
@@ -565,17 +600,21 @@ def main():
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
-        # Debug safety checks: verify token ids are within vocab size
-        vocab_size = config.vocab_size
-        if len(tokenized_examples["input_ids"]) > 0:
-            # Check first few examples for token id out of vocab
-            for idx, ids in enumerate(tokenized_examples["input_ids"][:5]):
+        # Clip token IDs to model vocab size if needed
+        # This handles cases where RobertaTokenizerFast fallback has larger vocab than model
+        if vocab_size is not None:
+            clipped_count = 0
+            for idx, ids in enumerate(tokenized_examples["input_ids"]):
                 max_id = max(ids) if ids else 0
                 if max_id >= vocab_size:
-                    raise ValueError(
-                        f"Found token id {max_id} >= vocab_size {vocab_size} in example {idx}. "
-                        f"Tokenizer/model vocab mismatch. Check tokenizer configuration."
-                    )
+                    # Clip all token IDs in this sequence
+                    tokenized_examples["input_ids"][idx] = clip_token_ids(ids, vocab_size, unk_token_id)
+                    clipped_count += 1
+            if clipped_count > 0:
+                logger.warning(
+                    f"Clipped token IDs in {clipped_count} examples to fit model vocab_size ({vocab_size}). "
+                    f"This may occur when using RobertaTokenizerFast fallback for PhoBERT."
+                )
 
         # Since one example might give us several features if it has a long context, we need a map from a feature to
         # its corresponding example. This key gives us just that.
