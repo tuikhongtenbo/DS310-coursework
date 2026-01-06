@@ -14,6 +14,7 @@ import re
 import string
 import sys
 
+sys.path.append("/kaggle/working")
 from logger import setup_logger
 
 OPTS = None
