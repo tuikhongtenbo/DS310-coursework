@@ -309,17 +309,17 @@ def main():
   logger = setup_logger("evaluation", log_dir=OPTS.log_dir)
   
   logger.info(f"Loading dataset from {OPTS.data_file}")
-  with open(OPTS.data_file) as f:
+  with open(OPTS.data_file, encoding="utf-8-sig") as f:
     dataset_json = json.load(f)
     dataset = dataset_json['data']
   
   logger.info(f"Loading predictions from {OPTS.pred_file}")
-  with open(OPTS.pred_file) as f:
+  with open(OPTS.pred_file, encoding="utf-8-sig") as f:
     preds = json.load(f)
   
   if OPTS.na_prob_file:
     logger.info(f"Loading no-answer probabilities from {OPTS.na_prob_file}")
-    with open(OPTS.na_prob_file) as f:
+    with open(OPTS.na_prob_file, encoding="utf-8-sig") as f:
       na_probs = json.load(f)
   else:
     logger.info("No na_prob_file provided, using default 0.0 for all questions")
@@ -372,7 +372,7 @@ def main():
   
   if OPTS.out_file:
     logger.info(f"Saving evaluation results to {OPTS.out_file}")
-    with open(OPTS.out_file, 'w') as f:
+    with open(OPTS.out_file, 'w', encoding="utf-8-sig") as f:
       json.dump(out_eval, f, indent=2)
   else:
     print(json.dumps(out_eval, indent=2))
